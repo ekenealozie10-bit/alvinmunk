@@ -487,3 +487,88 @@ fn writes_extend_quest_entries_to_bump_extend() {
         );
     }
 }
+
+#[test]
+fn quest_attester_binding_scopes_award() {
+    let f = setup();
+    let user = Address::generate(&f.env);
+    f.quest.create_quest(&1u32, &2u32, &50u64);
+    f.quest.create_quest(&2u32, &2u32, &50u64);
+
+    let partner_sk = signing_key(42);
+    let partner_pub = BytesN::from_array(&f.env, &partner_sk.verifying_key().to_bytes());
+
+    // Bind the partner key to quest 1 only.
+    f.quest.set_quest_attester(&1u32, &partner_pub);
+    assert_eq!(f.quest.get_quest_attester(&1u32), Some(partner_pub.clone()));
+
+    // The partner key can award quest 1.
+    award(&f, &partner_sk, 1, &user);
+    assert_eq!(f.rep.get_earned(&user), 50);
+
+    // The partner key cannot award quest 2.
+    let user2 = Address::generate(&f.env);
+    let payload = f.quest.quest_payload(&2u32, &user2);
+    let msg: std::vec::Vec<u8> = payload.iter().collect();
+    let sig = BytesN::from_array(&f.env, &partner_sk.sign(&msg).to_bytes());
+    let res = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        f.quest.award_quest(&partner_pub, &sig, &2u32, &user2);
+    }));
+    assert!(res.is_err());
+}
+
+#[test]
+fn unbound_quest_still_uses_global_allowlist() {
+    let f = setup();
+    let user = Address::generate(&f.env);
+    f.quest.create_quest(&1u32, &2u32, &50u64);
+
+    // No per-quest binding: the global attester key still works.
+    assert_eq!(f.quest.get_quest_attester(&1u32), None);
+    award(&f, &f.attester_sk, 1, &user);
+    assert_eq!(f.rep.get_earned(&user), 50);
+}
+
+#[test]
+fn cleared_quest_attester_reverts_to_global_allowlist() {
+    let f = setup();
+    let user = Address::generate(&f.env);
+    f.quest.create_quest(&1u32, &2u32, &50u64);
+
+    let partner_sk = signing_key(43);
+    let partner_pub = BytesN::from_array(&f.env, &partner_sk.verifying_key().to_bytes());
+    f.quest.set_quest_attester(&1u32, &partner_pub);
+    f.quest.clear_quest_attester(&1u32);
+    assert_eq!(f.quest.get_quest_attester(&1u32), None);
+
+    // After clearing, the global key works again.
+    award(&f, &f.attester_sk, 1, &user);
+    assert_eq!(f.rep.get_earned(&user), 50);
+}
+
+#[test]
+fn revoked_global_key_cannot_award_bound_quest() {
+    let f = setup();
+    let user = Address::generate(&f.env);
+    f.quest.create_quest(&1u32, &2u32, &50u64);
+
+    let partner_sk = signing_key(44);
+    let partner_pub = BytesN::from_array(&f.env, &partner_sk.verifying_key().to_bytes());
+    f.quest.set_quest_attester(&1u32, &partner_pub);
+
+    // Revoke the global attester key.
+    f.quest.remove_attester_key(&f.attester_pub);
+
+    // The global key can no longer award the bound quest.
+    let payload = f.quest.quest_payload(&1u32, &user);
+    let msg: std::vec::Vec<u8> = payload.iter().collect();
+    let sig = BytesN::from_array(&f.env, &f.attester_sk.sign(&msg).to_bytes());
+    let res = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        f.quest.award_quest(&f.attester_pub, &sig, &1u32, &user);
+    }));
+    assert!(res.is_err());
+
+    // The bound partner key still works.
+    award(&f, &partner_sk, 1, &user);
+    assert_eq!(f.rep.get_earned(&user), 50);
+}
