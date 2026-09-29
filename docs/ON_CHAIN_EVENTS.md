@@ -261,6 +261,55 @@ Note: this event is emitted **after** the cross-contract call to
 | 0 | `u32` | `quest_id` |
 | 1 | `Address` | `recipient` |
 
+### `quest` / `att_bind` (Quest Attester Bound)
+
+The admin bound a quest to one attester key with `set_quest_attester(quest_id, key)`.
+From then on `award_quest` accepts only that key's signature for the quest, and the
+global `AttesterKey` allowlist no longer applies to it. Rebinding emits this again with
+the new key. Monitoring should alert on it: it changes who can mint Earned XP.
+
+| Field | Type | Description |
+|-------|------|-------------|
+| **topics[0]** | `Symbol("quest")` | Event discriminator |
+| **topics[1]** | `Symbol("att_bind")` | Sub-type |
+
+**Data tuple**:
+
+| Index | Type | Description |
+|-------|------|-------------|
+| 0 | `u32` | `quest_id` |
+| 1 | `BytesN<32>` | `key` — the ed25519 attester public key now bound to the quest |
+
+### `quest` / `att_clear` (Quest Attester Cleared)
+
+The admin removed a quest's bound key with `clear_quest_attester(quest_id)`; the quest
+falls back to the global allowlist. Clearing a quest with no binding is a no-op and emits
+nothing.
+
+| Field | Type | Description |
+|-------|------|-------------|
+| **topics[0]** | `Symbol("quest")` | Event discriminator |
+| **topics[1]** | `Symbol("att_clear")` | Sub-type |
+
+**Data tuple**:
+
+| Index | Type | Description |
+|-------|------|-------------|
+| 0 | `u32` | `quest_id` |
+| 1 | `BytesN<32>` | `key` — the key that was bound until now |
+
+**Contract source**: `quest_registry/src/lib.rs` → `fn set_quest_attester()` / `fn clear_quest_attester()`
+
+```rust
+// Bind:
+env.events().publish(
+    (symbol_short!("quest"), symbol_short!("att_bind")), (quest_id, key));
+
+// Clear:
+env.events().publish(
+    (symbol_short!("quest"), symbol_short!("att_clear")), (quest_id, old));
+```
+
 ### `streak` (Weekly Retention)
 
 Emitted whenever a player's consecutive-week streak is updated (after a quest
@@ -572,7 +621,7 @@ Quick-reference table of all event discriminators and their sub-types.
 | `social` | *(none)* | Reputation | [↑](#social-social-track-total) |
 | `attester` | `add`, `rm` | Reputation | [↑](#attester-allowlist-change) |
 | `vouch` | `minted`, `claimed`, `slashed` | Reputation | [↑](#vouch-async-half-card-lifecycle) |
-| `quest` | `created`, `awarded` | QuestRegistry | [↑](#2-questregistry-contract) |
+| `quest` | `created`, `awarded`, `att_bind`, `att_clear` | QuestRegistry | [↑](#2-questregistry-contract) |
 | `streak` | *(none)* | QuestRegistry | [↑](#streak-weekly-retention) |
 | `handle` | `claimed`, `released` | Registry | [↑](#3-registry-contract-handles) |
 | `meta` | `set`, `cleared` | Registry | [↑](#meta--set) |
@@ -778,6 +827,28 @@ pub struct QuestConfig {
     pub active: bool,
 }
 ```
+
+### Quest attester scope (`get_quest_attester`)
+
+`get_quest_attester(quest_id) -> Option<BytesN<32>>` returns the ed25519 key bound to a
+quest, or `None` when the quest uses the global allowlist. Admin functions:
+
+| Function | Effect |
+|----------|--------|
+| `set_quest_attester(quest_id, key)` | Bind the quest to `key`, replacing any previous key. Reverts with `QuestNotFound` (#4) for an unknown quest. Emits `quest` / `att_bind`. |
+| `clear_quest_attester(quest_id)` | Remove the binding. Emits `quest` / `att_clear` when one existed. |
+
+`award_quest` then authorizes the signing key like this:
+
+- **Bound quest:** only the bound key. Any other key, including a globally allowlisted
+  one, reverts with `NotAuthorized` (#3).
+- **Unbound quest:** any key in the global allowlist (`add_attester_key`), as before.
+  Quests that were never bound behave exactly as they did before this view existed.
+
+A bound key does not need to be in the global allowlist, and a partner's key must not be
+added there: the allowlist grants every unbound quest. `remove_attester_key` only edits
+the allowlist, so to revoke a bound key call `clear_quest_attester` (or rebind the quest)
+too. A contract deployed before this view has no `get_quest_attester`.
 
 ### `Streak`
 

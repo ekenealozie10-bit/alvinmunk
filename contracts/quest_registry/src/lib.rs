@@ -1,19 +1,23 @@
-#`![no_std]
-/// QuestRegistry — verifiable quests with allowlisted attesters + replay guard.
-///
-/// `award_quest` is the oracle bridge (00-strategy §4): an off-chain attester
-/// verifies a real action (merged GitHub PR, referral wallet did a real ty),
-/// then calls here. We check the allowlist + replay set, then cross-call
-/// Reputation.award_xp. NO decentralized oracle.
+#![no_std]
+//! QuestRegistry — verifiable quests with allowlisted attesters + replay guard.
+//!
+//! `award_quest` is the oracle bridge (00-strategy §4): an off-chain attester
+//! verifies a real action (merged GitHub PR, referral wallet did a real tx),
+//! then calls here. We check the allowlist + replay set, then cross-call
+//! Reputation.award_xp. NO decentralized oracle.
+//!
+//! Attester scope: a quest bound to a key (`set_quest_attester`) accepts only that key,
+//! so a partner's quest key can't mint Earned XP on any other quest. Unbound quests accept
+//! any key in the global allowlist (`add_attester_key`), which is for in-house keys only.
 
-use soroban_sdk:{
+use soroban_sdk::{
     contract, contracterror, contractimpl, contracttype, panic_with_error, symbol_short,
     xdr::ToXdr, Address, Bytes, BytesN, Env, IntoVal, Symbol, Val, Vec,
 };
 
 // TTLs in ledgers (5s). `extend_ttl(key, threshold, extend_to)` does nothing unless the
 // entry's TTL is at or below `threshold`, and then sets it to `extend_to`. New persistent
-// entries start at the network's min_persistent_ttl (120,960 on testnet, 2,73,600 on
+// entries start at the network's min_persistent_ttl (120,960 on testnet, 2,073,600 on
 // mainnet), so the threshold sits one day under the target: the bump after a write lifts
 // the entry to BUMP_EXTEND unless it already ran within the last day. BUMP_EXTEND must stay
 // above mainnet's minimum and below max_entry_ttl (3,110,400).
@@ -41,10 +45,10 @@ pub enum DataKey {
     Reputation,              // Address of the Reputation contract
     Attester(Address),       // legacy address allowlist flag (kept for back-compat)
     AttesterKey(BytesN<32>), // ed25519 pubkey allowlist — the signature-verified attester
-    QuestAttester(u32),      // per-quest bound attester key (BytesN<32>)
     Quest(u32),              // QuestConfig
     Claimed(u32, Address),   // replay guard: (quest_id, recipient) -> bool
     Streak(Address),         // weekly retention streak per player
+    QuestAttester(u32),      // quest_id -> BytesN<32>: the only key that may award it
 }
 
 #[contracttype]
@@ -114,6 +118,8 @@ impl QuestRegistryContract {
             .set(&DataKey::AttesterKey(key), &true);
     }
 
+    /// Revoke a key from the global allowlist. Quest bindings are separate: a key bound to
+    /// a quest keeps awarding it until `clear_quest_attester`.
     pub fn remove_attester_key(env: Env, key: BytesN<32>) {
         Self::admin(&env).require_auth();
         env.storage()
@@ -121,43 +127,41 @@ impl QuestRegistryContract {
             .remove(&DataKey::AttesterKey(key));
     }
 
-    /// Admin-gated: bind a specific ed25519 attester key to a quest. Once bound, only
-    /// that key can authorize awards for this quest — the global allowlist is ignored.
-    /// This is the boundary that keeps a partner's quest key from becoming a treasury key.
+    /// Bind `quest_id` to one attester key (admin). From then on only `key` can award that
+    /// quest; the global allowlist no longer applies to it. The key need not (and, for a
+    /// partner, must not) be in the global allowlist. Rebinding replaces the previous key.
     pub fn set_quest_attester(env: Env, quest_id: u32, key: BytesN<32>) {
         Self::admin(&env).require_auth();
-        // Quest must exist so we can't bind keys to nonexistent ids.
         if !env.storage().persistent().has(&DataKey::Quest(quest_id)) {
             panic_with_error!(&env, Error::QuestNotFound);
         }
+        let k = DataKey::QuestAttester(quest_id);
+        env.storage().persistent().set(&k, &key);
         env.storage()
             .persistent()
-            .set(&DataKey::QuestAttester(quest_id), &key);
-        env.storage().persistent().extend_ttl(
-            &DataKey::QuestAttester(quest_id),
-            BUMP_THRESHOLD,
-            BUMP_EXTEND,
-        );
+            .extend_ttl(&k, BUMP_THRESHOLD, BUMP_EXTEND);
         env.events().publish(
-            (symbol_short!("quest"), symbol_short!("attbind")),
+            (symbol_short!("quest"), symbol_short!("att_bind")),
             (quest_id, key),
         );
     }
 
-    /// Admin-gated: clear a quest's bound attester. The quest falls back to the
-    /// global attester-key allowlist.
+    /// Remove a quest's bound key (admin), so the quest falls back to the global allowlist.
+    /// A no-op without an event when nothing is bound.
     pub fn clear_quest_attester(env: Env, quest_id: u32) {
         Self::admin(&env).require_auth();
-        env.storage()
-            .persistent()
-            .remove(&DataKey::QuestAttester(quest_id));
-        env.events().publish(
-            (symbol_short!("quest"), symbol_short!("attclr")),
-            quest_id,
-        );
+        let k = DataKey::QuestAttester(quest_id);
+        let old: Option<BytesN<32>> = env.storage().persistent().get(&k);
+        if let Some(old) = old {
+            env.storage().persistent().remove(&k);
+            env.events().publish(
+                (symbol_short!("quest"), symbol_short!("att_clear")),
+                (quest_id, old),
+            );
+        }
     }
 
-    /// Read view: the attester key bound to a quest, if any.
+    /// The key bound to `quest_id`, or `None` when the quest uses the global allowlist.
     pub fn get_quest_attester(env: Env, quest_id: u32) -> Option<BytesN<32>> {
         env.storage()
             .persistent()
@@ -202,11 +206,10 @@ impl QuestRegistryContract {
     }
 
     /// Award a verified quest to `recipient`. Replay-guarded. Dual authorization:
-    ///   1. `attester` (an ed25519 PUBKEY) signs the canonical payload — it
-    ///      alone can mint Earned XP (the anti-sybil keystone). A signature, not an on-chain
-    //      tx, so the serverless attester stays stateless.
-    ///   Authority is scoped: if the quest has a bound key (`set_quest_attester`),
-    ///   only that key is accepted; otherwise the global allowlist applies.
+    ///   1. `attester` (an ed25519 PUBKEY) signs the canonical payload — it alone can mint
+    ///      Earned XP (the anti-sybil keystone). A signature, not an on-chain tx, so the
+    ///      serverless attester stays stateless. It must be the quest's bound key when the
+    ///      quest has one, otherwise a key in the global allowlist.
     ///   2. `recipient.require_auth()` proves on-chain ownership of the credited wallet —
     ///      works uniformly for classic (G…) and passkey smart-account (C…) wallets.
     pub fn award_quest(
@@ -216,27 +219,8 @@ impl QuestRegistryContract {
         quest_id: u32,
         recipient: Address,
     ) {
-        // Scoped authority: a quest-bound key overrides the global allowlist.
-        let bound: Option<BytesN<32>> = env
-            .storage()
-            .persistent()
-            .get(&DataKey::QuestAttester(quest_id));
-        match bound {
-            Some(key) => {
-                if key != attester {
-                    panic_with_error(&env, Error::NotAuthorized);
-                }
-            }
-            None => {
-                if !env
-                    .storage()
-                    .persistent()
-                    .get(&DataKey::AttesterKey(attester.clone()))
-                    .unwrap_or(false)
-                {
-                    panic_with_error(&env, Error::NotAuthorized);
-                }
-            }
+        if !Self::attester_may_award(&env, &attester, quest_id) {
+            panic_with_error!(&env, Error::NotAuthorized);
         }
         let message = Self::payload(&env, quest_id, &recipient);
         env.crypto().ed25519_verify(&attester, &message, &sig);
@@ -246,15 +230,15 @@ impl QuestRegistryContract {
             .storage()
             .persistent()
             .get(&DataKey::Quest(quest_id))
-            .unwrap_or_else(|| panic_with_error(&env, Error::QuestNotFound));
+            .unwrap_or_else(|| panic_with_error!(&env, Error::QuestNotFound));
         if !quest.active {
-            panic_with_error(&env, Error::QuestInactive);
+            panic_with_error!(&env, Error::QuestInactive);
         }
 
         // Replay guard: check-and-set atomically.
         let claim_key = DataKey::Claimed(quest_id, recipient.clone());
         if env.storage().persistent().get(&claim_key).unwrap_or(false) {
-            panic_with_error(&env, Error::AlreadyClaimed);
+            panic_with_error!(&env, Error::AlreadyClaimed);
         }
         env.storage().persistent().set(&claim_key, &true);
         env.storage()
@@ -269,14 +253,14 @@ impl QuestRegistryContract {
         // allowlisted attester in Reputation (set Reputation.add_attester(this_addr)).
         let reputation: Address = env.storage().instance().get(&DataKey::Reputation).unwrap();
         let func: Symbol = symbol_short!("award_xp");
-        let args = soroban_sdk::vecl[
+        let args = soroban_sdk::vec![
             &env,
             env.current_contract_address().into_val(&env),
             recipient.into_val(&env),
             quest.schema_id.into_val(&env),
             quest.xp.into_val(&env),
         ];
-        env.invoke_contract::<(>(&reputation, &func, args);
+        env.invoke_contract::<()>(&reputation, &func, args);
 
         env.events().publish(
             (symbol_short!("quest"), symbol_short!("awarded")),
@@ -300,7 +284,7 @@ impl QuestRegistryContract {
 
     /// A player's weekly streak (consecutive weeks with ≥1 completed quest), as of now.
     /// The stored run only changes on the next award, so a run whose last completion is
-    /// older than last week reads as `weeks = 0` — it can no longer be extended.
+    /// older than last week reads as `weeks = 0` here — it can no longer be extended.
     /// `last_week` and `best` are returned as stored. Read-only: storage is not rewritten.
     pub fn get_streak(env: Env, player: Address) -> Streak {
         let mut s: Streak = env
@@ -318,7 +302,7 @@ impl QuestRegistryContract {
         s
     }
 
-    /// --- internal ---
+    // --- internal ---
 
     /// Canonical signing payload: XDR of [quest_id, recipient, this_contract]. Binding the
     /// contract address stops a signature being replayed against another deployment.
@@ -328,6 +312,23 @@ impl QuestRegistryContract {
         parts.push_back(recipient.clone().into_val(env));
         parts.push_back(env.current_contract_address().into_val(env));
         parts.to_xdr(env)
+    }
+
+    /// A quest's bound key is its only attester; an unbound quest takes any globally
+    /// allowlisted key.
+    fn attester_may_award(env: &Env, attester: &BytesN<32>, quest_id: u32) -> bool {
+        let bound: Option<BytesN<32>> = env
+            .storage()
+            .persistent()
+            .get(&DataKey::QuestAttester(quest_id));
+        match bound {
+            Some(key) => key == *attester,
+            None => env
+                .storage()
+                .persistent()
+                .get(&DataKey::AttesterKey(attester.clone()))
+                .unwrap_or(false),
+        }
     }
 
     /// Weeks are aligned on the Unix epoch, and 1970-01-01 was a Thursday, so every week
@@ -352,24 +353,30 @@ impl QuestRegistryContract {
         if s.weeks > 0 && s.last_week == week {
             // already counted this week — nothing to do.
         } else if s.weeks > 0 && s.last_week.saturating_add(1) == week {
-            s.weeks += 1;
+            s.weeks = s.weeks.saturating_add(1);
+            s.last_week = week;
         } else {
             s.weeks = 1;
+            s.last_week = week;
         }
         if s.weeks > s.best {
             s.best = s.weeks;
         }
-        s.last_week = week;
         env.storage().persistent().set(&key, &s);
         env.storage()
             .persistent()
             .extend_ttl(&key, BUMP_THRESHOLD, BUMP_EXTEND);
+        env.events()
+            .publish((symbol_short!("streak"), player.clone()), (s.weeks, s.best));
     }
 
     fn admin(env: &Env) -> Address {
         env.storage()
             .instance()
             .get(&DataKey::Admin)
-            .unwrap_or_else(|| panic_with_error(env, Error::NotInitialized))
+            .unwrap_or_else(|| panic_with_error!(env, Error::NotInitialized))
     }
 }
+
+#[cfg(test)]
+mod test;
