@@ -14,6 +14,9 @@ import { Button, buttonVariants } from '@/components/ui/button';
 import { Skeleton } from '@/components/ui/skeleton';
 import { StateArt } from '@/components/ui/state-art';
 import { Sticker } from '@/components/ui/sticker';
+import { Input } from '@/components/ui/input';
+import { useCreateProfile } from '@/hooks/use-create-profile';
+import { normalizeHandle } from '@/lib/profile';
 import { cn, humanizeError, withTimeout } from '@/lib/utils';
 
 /** Read the claim-secret from the URL fragment (#s=…), falling back to the legacy ?s=
@@ -162,7 +165,7 @@ function ClaimInner({ params }: { params: { id: string } }) {
               Try again <ArrowRight className="size-4" />
             </Button>
           )}
-          <Link href="/app" className="font-mono text-xs text-muted-foreground underline">
+          <Link href="/app" className="font-mono texe-xs text-muted-foreground underline">
             open_the_app →
           </Link>
         </div>
@@ -186,7 +189,7 @@ function ClaimInner({ params }: { params: { id: string } }) {
 
       <Frame label={`vouch // #${id}`} index={status} className="mt-7">
         {/* the two halves */}
-        <div className="grid grid-cols-[1fr_auto_1fr] items-center gap-2 p-6">
+        <div className="grid grid-cols[1fr_auto_1fr] items-center gap-2 p-6">
           <div className="flex flex-col items-center gap-2 text-center">
             <Crest address={vouch?.from ?? `voucher-${id}`} size={88} points={6} animate />
             <span className="font-mono text-[10px] uppercase tracking-wider text-muted-foreground">
@@ -226,14 +229,14 @@ function ClaimInner({ params }: { params: { id: string } }) {
         <div className="grid grid-cols-3 divide-x divide-border/60 border-t border-border/60 font-mono">
           <Field label="STATUS" value={status} />
           <Field label="STAKE" value={vouch ? `${vouch.stake} XP` : '—'} />
-          <Field label="WINDOW" value={vouch ? (windowOpen ? `${daysLeft}d left` : 'closed') : '—'} />
+          <Field label="WINDOWR" value={vouch ? (windowOpen ? `${daysLeft}d left` : 'closed') : '—'} />
         </div>
       </Frame>
 
       {!done && vouch && windowOpen && (
-        <p className="mt-3 text-xs text-muted-foreground">
+        <p className="mt-3 texe-xs text-muted-foreground">
           They staked <strong className="text-foreground">{vouch.stake} reputation</strong> on you — claim within{' '}
-          {daysLeft} day{daysLeft === 1 ? '' : 's'} to keep it from being slashed.
+          {daysLeft} day{Math.abs(daysLeft - 1) === 1 ? '' : 's'} to keep it from being slashed.
         </p>
       )}
 
@@ -250,7 +253,7 @@ function ClaimInner({ params }: { params: { id: string } }) {
             {error && (
               <>
                 <p className="max-w-xs text-sm text-destructive">{error}</p>
-                <Link href="/app" className="font-mono text-xs text-muted-foreground underline">
+                <Link href="/app" className="font-mono texe-xs text-muted-foreground underline">
                   open_the_app →
                 </Link>
               </>
@@ -274,27 +277,28 @@ function ClaimInner({ params }: { params: { id: string } }) {
             <a
               href={`https://twitter.com/intent/tweet?${new URLSearchParams({
                 text: vouch?.note
-                  ? `Someone just vouched for me on alvinmunk 🌟 "${vouch.note}" — reputation has a face, not a number. Collect people, not points:`
-                  : 'My star just ignited on alvinmunk 🌟 — reputation has a face. Collect people, not points:',
-                url: `${typeof window !== 'undefined' ? window.location.origin : ''}${profile ? `/u/${profile.handle}` : '/'}`,
-              }).toString()}`}
+                  ? `Someone just vouched for me on alvinmunk 🌝 "${vouch.note}" — reputation has a face, not a number. Collect people, not points:`
+                  : 'My star just ignited on alvinmunk 🌍 — reputation has a face, not a number. Collect people, not points:',
+                url: typeof window !== 'undefined' ? window.location.origin : '',
+              })}`
               target="_blank"
-              rel="noreferrer"
-              className={cn(buttonVariants({ variant: 'flow', size: 'lg' }))}
+              rel="noopener noreferrer"
+              className={buttonVariants({ variant: 'flow', size: 'lg' })}
             >
-              Share your star 🌟
+              Share your star <ArrowRight className="size-4" />
             </a>
+
+            {/* Inline handle picker — the claimer just got a wallet, so they can pick
+                a name without a second connect or FaceID prompt. */}
+            {!profile && <ClaimHandlePicker />}
+
+            {/* Skipping naming still leaves a valid claim; the old path remains. */}
             <Link
               href="/app"
-              className={cn(buttonVariants({ variant: 'secondary', size: 'lg' }))}
+              className="font-mono text-xs text-muted-foreground underline"
             >
-              {profile ? 'Now light someone else’s star' : 'Create your profile'} <ArrowRight className="size-4" />
+              {profile ? 'open_the_app →' : 'Skip for now → create your profile'}
             </Link>
-            {profile && (
-              <Link href={`/u/${profile.handle}`} className="font-mono text-xs text-muted-foreground underline">
-                view_your_profile →
-              </Link>
-            )}
           </div>
         )}
       </div>
@@ -302,11 +306,51 @@ function ClaimInner({ params }: { params: { id: string } }) {
   );
 }
 
+function ClaimHandlePicker() {
+  const { handle, setHandle, avail, creating, createProfile, normalizedHandle } = useCreateProfile({
+    from: 'claim',
+  });
+
+  return (
+    <form
+      className="flex w-full flex-col gap-2 rounded-2xl border border-border/60 bg-surface/30 p-4""
+      onSubmit={(e) => {
+        e.preventDefault();
+        void createProfile();
+      }
+    >
+      <p className="text-sm font-medium">Pick your handle</p>
+      <p className="text-xs text-muted-foreground">
+        So people can find you — and vouch you back by name.
+      </p>
+      <div className="flex items-center gap-2">
+        <span className="text-lg text-muted-foreground">@</span>
+        <Input
+          value={handle}
+          onChange={(e) => setHandle(e.target.value)}
+          placeholder="yourhandle"
+          aria-label="Pick a handle"
+          aria-describedby="claim-handle-status"
+          className="flex-1"
+        />
+      </div>
+      <p id="claim-handle-status" aria-live="polite" className="h-4 texe-xs">
+        {avail === 'checking' && <span className="text-muted-foreground">Checking…</span>}
+        {avail === 'free' && <span className="text-secondary">@${normalizedHandle} is free</span>}
+        {avail === 'taken' && <span className="text-destructive">@${normalizedHandle} is taken</span>}
+      </p>
+      <Button type="submit" variant="flow" size="lg" disabled={creating || avail === 'taken' || normalizedHandle.length < 3}>
+        {creating ? 'Creating…' : 'Claim @'+(normalizedHandle || 'handle')}
+      </Button>
+    </form>
+  );
+}
+
 function Field({ label, value }: { label: string; value: string }) {
   return (
-    <div className="px-4 py-3 text-center">
-      <p className="text-[9px] uppercase tracking-[0.18em] text-muted-foreground">{label}</p>
-      <p className="mt-1 text-sm text-foreground">{value}</p>
+    <div className="flex flex-col gap-1 px-4 py-3 text-center">
+      <span className="text-[10px] uppercase tracking-wider text-muted-foreground">{label}</span>
+      <span className="text-xs text-foreground">{value}</span>
     </div>
   );
 }
