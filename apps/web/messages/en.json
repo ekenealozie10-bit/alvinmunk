@@ -95,6 +95,23 @@
   "onboard.app.errTaken": "@{handle} is taken — pick another.",
   "onboard.app.success": "Your profile is live — @{handle} stamped on-chain.",
 
+  "onboard.claim.errShort": "Pick a handle — 3+ letters or numbers.",
+  "onboard.claim.errTaken": "@{handle} is taken — pick another.",
+  "onboard.claim.success": "You're in — @{handle} stamped on-chain.",
+
+  "claim.handle.title": "Pick your handle",
+  "claim.handle.subtitle": "So people can find you — and vouch you back by name.",
+  "claim.handle.placeholder": "yourhandle",
+  "claim.handle.ariaLabel": "Pick a handle",
+  "claim.handle.checking": "Checking…",
+  "claim.handle.free": "@{handle} is free",
+  "claim.handle.taken": "@{handle} is taken",
+  "claim.handle.submit": "Claim @{handle}",
+  "claim.handle.submitting": "Creating…",
+  "claim.skip": "Skip for now → create your profile",
+  "claim.openApp": "open_the_app →",
+  "claim.viewProfile": "view_your_profile →",
+
   "appHome.whatNow": "What now",
   "appHome.recentActivity": "Recent activity",
   "appHome.viewAll": "View all",
